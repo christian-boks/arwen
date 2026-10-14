@@ -570,6 +570,15 @@ def build_parser(*, render_only: bool = False, preset_only: bool = False) -> arg
                           "(also OUTDIR/benchmark-timing.json)")
     run.add_argument("--met-em", type=Path, metavar="DIR",
                      help="WPS metgrid directory with met_em.d0*.nc and producing namelist.input; native ArWen initialization")
+    run.add_argument("--history-vars", default=None, metavar="LIST",
+                     help="met_em: comma-separated wrfout variables the history tape "
+                          "carries (the [output] history_vars of a CONFIG run), e.g. "
+                          "RAINNC,SNOWNC,GRAUPELNC; the georeference and time "
+                          "coordinate are always kept.  Absent writes everything")
+    run.add_argument("--products", dest="render_products", default=None, metavar="LIST",
+                     help="WRF inputs: which product plots the run draws, in gpuwm "
+                          "render's spelling: a comma-separated list, `all`, or `none` "
+                          "for raw wrfout only.  Absent draws the default catalog")
     run.add_argument("--soil-source", type=Path, default=None, metavar="DIR",
                      help="WRF inputs: original met_em and Vtable directory for automatic soil-water recovery; defaults to the input directory")
     run.add_argument("--rrtmg-variant", choices=("rrtmg_legacy", "rte-rrtmgp"), default=None,
@@ -822,6 +831,15 @@ def _dispatch_argv(argv: list[str] | None = None) -> int:
             parser.error("--vertical-levels is for --met-em inputs")
         if args.vertical_grid is not None and args.met_em is None:
             parser.error("--vertical-grid is for --met-em inputs")
+        # Breakage these prevent: a CONFIG run takes its products and its
+        # [output] selection from the TOML, so either flag would be read by
+        # nothing there and the run would still write and draw everything.
+        if args.history_vars is not None and args.met_em is None:
+            parser.error("--history-vars selects the --met-em history tape; a CONFIG "
+                         "run sets [output] history_vars in its TOML")
+        if args.render_products is not None and args.config is not None:
+            parser.error("--products is for --wrfinput or --met-em; a CONFIG run "
+                         "chooses its products in the TOML")
         if args.preprocess_backend is not None and args.config is None:
             parser.error("--preprocess-backend pins CONFIG's preparation; the "
                          "--wrfinput and --met-em routes do not read it, so it "
@@ -1436,6 +1454,8 @@ def _dispatch(args) -> int:
                                health_debug=args.health_debug, gpu_uuid=args.gpu_uuid,
                                exclusive_gpu=not args.no_supervise,
                                rrtmg_variant=args.rrtmg_variant,
+                               render_products=args.render_products,
+                               **({} if args.history_vars is None else {"history_vars": args.history_vars}),
                                **({} if getattr(args,"thompson_version",None) is None else {"thompson_version":args.thompson_version}),
                                allow_shared_gpu=args.allow_shared_gpu,
                                **({} if ensemble_request is None else

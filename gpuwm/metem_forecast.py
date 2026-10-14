@@ -705,7 +705,7 @@ def run_metem_forecast(directory, outdir, *, run_seconds=None, restart=None,
                        exclusive_gpu=True, rrtmg_variant=None, vertical_grid=None,
                        render_products=None, render_dir=None, progress_options=None,
                        relaunched=False, vertical_levels=None, allow_shared_gpu=False,
-                       output_owner=None, ensemble_request=None):
+                       output_owner=None, ensemble_request=None, history_vars=None):
     import os
     import subprocess
     import sys
@@ -736,6 +736,10 @@ def run_metem_forecast(directory, outdir, *, run_seconds=None, restart=None,
     # and outdir.mkdir, so a met_em carrying a field this build cannot
     # transport was refused once the run had started.
     check_analyzed_scalar_capabilities(run)
+    # The --history-vars selection, validated at plan review too: an
+    # unknown variable name is a sentence now rather than a refusal from
+    # the history writer after the forecast has run.
+    history_selection = metem_history_selection(history_vars)
     # Plan review, and before the card: a refused --outdir used to be
     # an errno raised inside the worker child, minutes after this
     # process had reserved a GPU for it.
@@ -771,6 +775,8 @@ def run_metem_forecast(directory, outdir, *, run_seconds=None, restart=None,
             # nothing on the supervised path people use by default.
             if render_products is not None: command += ['--products',str(render_products)]
             if render_dir is not None: command += ['--render-dir',str(Path(render_dir).resolve())]
+            if history_selection is not None:
+                command += ['--history-vars',','.join(history_selection.history_vars)]
             command += ProgressOptions.worker_flags(progress_options)
             with input_device_lease(request, gpu_uuid=gpu_uuid,
                     run_id=f'metgrid-{os.getpid()}', allow_shared_gpu=allow_shared_gpu,
@@ -791,6 +797,13 @@ def run_metem_forecast(directory, outdir, *, run_seconds=None, restart=None,
         print('met_em: preparing native initial states and lateral boundaries.', flush=True)
         inputs = prepare_metem_run(run,worker_output/'input',run_seconds=run_seconds,
                                    vertical_grid=vertical_grid,vertical_levels=vertical_levels)
+        if history_selection is not None:
+            # The tree runner hands ``experiment.output`` to every domain's
+            # history writer; the selection changes which variables reach
+            # the tape and no number the model computes, so it stays out of
+            # the prepared identity exactly as a CONFIG run's [output] does.
+            from dataclasses import replace
+            inputs = replace(inputs, experiment=replace(inputs.experiment, output=history_selection))
         announce_wrf_substitutions(run, inputs.prepared_root/'metgrid-import.json')
         plan = door_render_plan(worker_output, render_products=render_products,
                                 render_dir=None if render_dir is None else io_path(render_dir),
@@ -852,6 +865,10 @@ def build_parser():
              'default catalog at the end of the run')
     parser.add_argument('--render-dir',type=Path,default=None,metavar='DIR',
         help="where this run's pictures go; defaults to OUTDIR/" + RENDER_ROOT_NAME)
+    parser.add_argument('--history-vars',default=None,metavar='LIST',
+        help='comma-separated wrfout variables the history tape carries (the [output] '
+             'history_vars of a CONFIG run); the georeference and time coordinate are '
+             'always kept.  Absent writes everything')
     add_progress_arguments(parser)
     parser.add_argument('--allow-shared-gpu',action='store_true',
         help='proceed when another CUDA compute process holds the selected GPU. The requested configuration is retained')
@@ -879,15 +896,31 @@ def main(argv=None):
             render_products=args.render_products,render_dir=args.render_dir,
             progress_options=ProgressOptions.from_args(args),relaunched=args._worker,
             vertical_levels=args.vertical_levels,allow_shared_gpu=args.allow_shared_gpu,
-            output_owner=args._output_owner,
+            output_owner=args._output_owner,history_vars=args.history_vars,
             **({} if request is None else {"ensemble_request": request.receipt()}))
     except (ValueError,OSError) as error:
         print(f'{DOOR}: {error}',file=sys.stderr)
         return 2
 
 
-if __name__ == '__main__':
-    raise SystemExit(main())
+def metem_history_selection(history_vars):
+    """``--history-vars`` as an ``[output]`` selection, or ``None`` for the
+    experiment's own (everything the run produces).
+
+    Takes the flag's comma-separated spelling or a sequence of names, and
+    validates through :meth:`HistorySelection.from_mapping` -- the same
+    door a CONFIG run's ``[output] history_vars`` passes -- so the two
+    routes accept and refuse exactly the same names.
+    """
+    if history_vars is None:
+        return None
+    names = ([name.strip() for name in history_vars.split(',')]
+             if isinstance(history_vars, str) else list(history_vars))
+    names = [name for name in names if name]
+    if not names:
+        raise ValueError('--history-vars names no variable; omit it to write everything')
+    from gpuwm.io.history_selection import HistorySelection
+    return HistorySelection.from_mapping({'history_vars': names}, source='--history-vars')
 
 
 def _smooth_cg_case(exp, case, held: dict):
@@ -915,3 +948,12 @@ def _smooth_cg_case(exp, case, held: dict):
     statics = dict(case.statics)
     statics["HGT_M"] = terrain
     return replace(case, terrain=terrain, statics=MappingProxyType(statics))
+
+
+# Last in the module, deliberately: the supervised worker runs this file as
+# ``python -m gpuwm.metem_forecast``, which executes it top to bottom, so a
+# guard above a helper calls main() before that helper is defined.  2.8.9 had
+# ``_smooth_cg_case`` below the guard, and every supervised met_em run died
+# with NameError at its first root-domain time.
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -540,3 +540,47 @@ def test_common_cli_rejects_metem_levels_on_wrfinput_before_readiness(monkeypatc
     with pytest.raises(SystemExit) as stopped:
         cli.main(['run', '--wrfinput', 'wrf', '--vertical-levels', '32'])
     assert stopped.value.code == 2
+
+
+def test_main_guard_is_the_modules_last_statement():
+    """The supervised worker runs this module as ``__main__``: a guard above a
+    helper calls main() before the helper exists (2.8.9 died with NameError on
+    ``_smooth_cg_case`` at every supervised met_em run)."""
+    import ast
+    from gpuwm import metem_forecast
+    tree = ast.parse(Path(metem_forecast.__file__).read_text(encoding='utf-8'))
+    guards = [node for node in tree.body
+              if isinstance(node, ast.If) and '__main__' in ast.unparse(node.test)]
+    assert guards == [tree.body[-1]]
+
+
+def test_history_vars_become_the_output_selection():
+    from gpuwm.metem_forecast import metem_history_selection
+    assert metem_history_selection(None) is None
+    assert metem_history_selection(' RAINNC, SNOWNC ,GRAUPELNC').history_vars == (
+        'RAINNC', 'SNOWNC', 'GRAUPELNC')
+    assert metem_history_selection(['RAINNC']).history_vars == ('RAINNC',)
+    with pytest.raises(ValueError, match='names no variable'):
+        metem_history_selection(' , ')
+
+
+def test_public_metgrid_carries_history_vars_and_products(monkeypatch):
+    from gpuwm import cli, capabilities, provenance_gate, metem_forecast
+    calls=[]
+    monkeypatch.setattr(capabilities,'require_for_command',lambda *a:None)
+    monkeypatch.setattr(provenance_gate,'announce',lambda *a:None)
+    monkeypatch.setattr(metem_forecast,'run_metem_forecast',lambda *a,**kw:calls.append(kw) or 0)
+    assert cli.main(['run','--met-em','met','--outdir','forecast',
+                     '--history-vars','RAINNC,SNOWNC','--products','none']) == 0
+    assert calls[0]['history_vars'] == 'RAINNC,SNOWNC'
+    assert calls[0]['render_products'] == 'none'
+
+
+@pytest.mark.parametrize('arguments', [['--wrfinput','wrf','--history-vars','RAINNC'],
+    ['case.toml','--history-vars','RAINNC'], ['case.toml','--products','none']])
+def test_selection_flags_refuse_routes_that_would_ignore_them(monkeypatch, arguments):
+    from gpuwm import cli, capabilities
+    monkeypatch.setattr(capabilities,'require_for_command',lambda *a:pytest.fail('refusal reached readiness'))
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(['run',*arguments])
+    assert stopped.value.code == 2
