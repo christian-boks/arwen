@@ -4650,6 +4650,38 @@ def _apply_run_length(exp, run_seconds: float):
     return executed, _run_length_override(float(exp.run_seconds), requested)
 
 
+def _apply_restart_interval(exp, restart_interval_seconds: float | None):
+    """The experiment this run integrates, writing checkpoints every
+    ``restart_interval_seconds`` (0 = none) instead of the hash-bound cadence.
+
+    Like the run length, the cadence moves no prepared identity: the
+    preparation never reads it, and the restart identity leaves it out on
+    purpose (``core/model.py``: binding it "made restart_interval_s
+    useless" for resume), so a resumed run may checkpoint at another
+    cadence than the run that wrote its checkpoint.  Both copies
+    (``ExperimentConfig.restart_interval_s`` and the derived
+    ``RunConfig.restart_interval_s``) are replaced together, so the tick
+    clock, the disk budget and the checkpoint writer see one value.
+    ``None`` or an equal value returns the experiment unchanged.
+    """
+
+    if restart_interval_seconds is None:
+        return exp
+    requested = float(restart_interval_seconds)
+    if not math.isfinite(requested) or requested < 0.0:
+        raise ValueError("restart-interval-seconds must be finite and non-negative")
+    if float(exp.restart_interval_s) == requested \
+            and float(exp.root.run.restart_interval_s) == requested:
+        return exp
+    from gpuwm.config import validate_run_config
+    executed_run = validate_run_config(
+        replace(exp.root.run, restart_interval_s=requested))
+    domain = replace(exp.root, run=executed_run)
+    warn(f"restart cadence {float(exp.restart_interval_s):g} s -> "
+         f"{requested:g} s for this run (--restart-interval-seconds)")
+    return replace(exp, restart_interval_s=requested, domains=(domain,))
+
+
 def _apply_runtime_run_overrides(exp, overrides):
     """Apply only run fields the prepared-state contract declares inert."""
     if overrides is None:
@@ -6813,6 +6845,7 @@ def preflight_prepared_forecast(
         tiles=None, devices: int | None = None, devices_options=None,
         simulated_radar=None, radar_heating=None,
         runtime_run_overrides: Mapping[str, object] | None = None,
+        restart_interval_seconds: float | None = None,
 ) -> PreparedForecastInputs:
     """Validate every portable preparation authority without importing CuPy.
 
@@ -7004,6 +7037,7 @@ def preflight_prepared_forecast(
     # The requested length is the executed length; a longer one than the
     # prepared forcing reaches refuses at the coverage gate below.
     exp, _run_length = _apply_run_length(exp, run_seconds)
+    exp = _apply_restart_interval(exp, restart_interval_seconds)
     physics_receipt = _validate_physics(
         exp, physics_profile, run_seconds, history_interval_seconds,
         source=source, expert_acknowledgements=expert_acknowledgements)
@@ -10827,6 +10861,17 @@ def _positive_finite_seconds(value: str) -> float:
     return seconds
 
 
+def _non_negative_finite_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be a number of seconds") from error
+    if not math.isfinite(seconds) or seconds < 0.0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return seconds
+
+
 def _clock_defaults(experiment_config: Path) -> tuple[float, float]:
     """The run length and history cadence the experiment already declares.
 
@@ -10970,6 +11015,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=("history cadence; must equal the hash-bound experiment's d01 "
               "history_interval_s, and defaults to it when omitted"))
+    parser.add_argument(
+        "--restart-interval-seconds", type=_non_negative_finite_seconds,
+        default=None,
+        help=("checkpoint cadence of this run; 0 writes none.  Defaults to "
+              "the hash-bound experiment's restart_interval_s.  The restart "
+              "identity does not bind the cadence, so a run resumed from a "
+              "checkpoint (an analysis cycle's forecast, say) may write "
+              "its own checkpoints at another cadence, or none"))
     parser.add_argument("--io-mode", choices=("history",), required=True)
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--devices-table", default=None, metavar="JSON",
@@ -11530,6 +11583,7 @@ def main(argv=None, *, observer=None) -> int:
             expert_acknowledgements=tuple(args.ack),
             run_seconds=args.run_seconds,
             history_interval_seconds=args.history_interval_seconds,
+            restart_interval_seconds=args.restart_interval_seconds,
             domain_bundle=args.domain_bundle,
             tiles=tiles, devices=args.devices, devices_options=devices_options,
             **({} if simulated_radar is None else {"simulated_radar": simulated_radar}),
