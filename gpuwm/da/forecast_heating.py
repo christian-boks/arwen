@@ -293,11 +293,17 @@ def resume_plan(heating, restored_seconds) -> dict:
     run free after it, as the uninterrupted run does.
 
     The slot clock starts at zero on attach, so a forcing attached to a
-    state restored at minute 70 would read window 1 at minute 70."""
+    state restored at minute 70 would read window 1 at minute 70 — unless
+    the table sets ``resume_on_clock``: then the attach sets the clock to the
+    restored time (``clock_seconds``), so a cycling leg resumed at minute 70
+    reads the window it is in."""
     if restored_seconds is None:
         return {"attach": True, "status": "FORCED"}
     restored = float(restored_seconds)
     active = float(heating.active_minutes) * 60.0
+    if restored < active and getattr(heating, "resume_on_clock", False):
+        return {"attach": True, "status": "FORCED_RESUMED_ON_CLOCK",
+                "restored_seconds": restored, "clock_seconds": restored}
     if restored < active:
         raise ForecastHeatingRefused(
             f"{REFUSAL_LABEL}: the checkpoint is at {restored:g} s, inside "
@@ -637,6 +643,7 @@ class ForecastHeating:
             slots, self.heating.window_end_minutes(), receipts=receipts,
             provenance=self._provenance(), mp_tend_lim=self.heating.mp_tend_lim,
             active_minutes=self.heating.active_minutes)
+        forcing.elapsed_seconds = float(self.plan.get("clock_seconds", 0.0))
         radar_tten.attach(node.state, forcing, cfg)
         self._attached.append((node.state, forcing, None))
         self.build["seconds"] = round(time.perf_counter() - started, 3)
@@ -719,6 +726,7 @@ class ForecastHeating:
                     mp_tend_lim=self.heating.mp_tend_lim,
                     active_minutes=self.heating.active_minutes,
                     extent=(spec.cj0, spec.ci0, ny, nx))
+                forcing.elapsed_seconds = float(self.plan.get("clock_seconds", 0.0))
                 setattr(tile, radar_tten.SLAB_ATTRIBUTE, (spec.cj0, spec.ci0))
                 radar_tten.attach(tile, forcing, sub_cfgs[rank])
                 # The uploads ran on the default stream and the rank steps

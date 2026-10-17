@@ -6838,6 +6838,9 @@ RADAR_HEATING_KEY_ROWS = _key_rows(
             "heat down to the PBL top where 200 hPa of the column is observed"),
     _KeyRow("mp_tend_lim", "number", 0.07,
             "microphysics heating clamp in K/s while forced (HRRR's 0.07)"),
+    _KeyRow("resume_on_clock", "boolean", False,
+            "a resume inside the forced period attaches with the slot clock at "
+            "the restored time (radar cycling legs) instead of refusing"),
 )
 RADAR_HEATING_KEYS = frozenset(RADAR_HEATING_KEY_ROWS)
 
@@ -6866,6 +6869,7 @@ class RadarHeatingConfig:
     strict_suppression: bool = False
     pbl_extension: bool = False
     mp_tend_lim: float = 0.07
+    resume_on_clock: bool = False
 
     @property
     def enabled(self) -> bool:

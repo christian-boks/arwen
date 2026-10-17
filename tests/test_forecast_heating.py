@@ -73,7 +73,7 @@ def test_the_table_parses_with_its_declared_defaults():
     rows = declared_key_rows()["radar_heating"]
     assert set(rows) == set(RADAR_HEATING_KEY_ROWS) == {
         "windows", "window_minutes", "active_minutes", "latent_heat_period_min",
-        "strict_suppression", "pbl_extension", "mp_tend_lim"}
+        "strict_suppression", "pbl_extension", "mp_tend_lim", "resume_on_clock"}
     assert rows["windows"]["required"] is True
     assert rows["mp_tend_lim"]["default"] == 0.07
 
@@ -180,6 +180,22 @@ def test_a_resume_inside_the_forced_period_is_refused():
         fh.resume_plan(heating, 70 * 60.0)
     after = fh.resume_plan(heating, 120 * 60.0)
     assert after["attach"] is False and after["status"] == "RESUMED_AFTER_FORCED_PERIOD"
+
+
+def test_resume_on_clock_attaches_a_resume_with_the_clock_at_the_restored_time():
+    heating = RadarHeatingConfig(windows="/w", window_minutes=10.0, active_minutes=120.0,
+                                 resume_on_clock=True)
+    plan = fh.resume_plan(heating, 70 * 60.0)
+    assert plan["attach"] is True and plan["status"] == "FORCED_RESUMED_ON_CLOCK"
+    assert plan["clock_seconds"] == 70 * 60.0
+    # A fresh start still starts the clock at zero; past the forced period it runs free.
+    assert fh.resume_plan(heating, None) == {"attach": True, "status": "FORCED"}
+    assert fh.resume_plan(heating, 120 * 60.0)["attach"] is False
+    # The key goes through the table like the others.
+    parsed = RadarHeatingConfig.from_mapping({"windows": "/w", "window_minutes": 10,
+                                              "active_minutes": 120, "resume_on_clock": True},
+                                             source="test")
+    assert parsed.resume_on_clock is True
 
 
 def test_the_forcing_is_restart_infrastructure():
